@@ -25,6 +25,7 @@ PROXY_PORT = (os.environ.get("PROXY_PORT") or "").strip()
 PROXY_USER = (os.environ.get("PROXY_USER") or "").strip()
 PROXY_PASS = (os.environ.get("PROXY_PASS") or "").strip()
 PROXY_SCHEME = (os.environ.get("PROXY_SCHEME") or "socks5").strip().lower()
+# 可选：直接指定服务器数字 id（表单里的 2591），不设则自动点第一个 Extend
 SERVER_ID = (os.environ.get("SERVER_ID") or "").strip()
 
 BASE_URL = "https://client.therose.cloud/login"
@@ -161,7 +162,7 @@ def find_first(sb, selectors, timeout=5):
     for i, sel in enumerate(selectors):
         t = timeout if i == 0 else 1
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout 参数
+            if sb.is_element_present(sel, timeout=t):
                 return sel
         except Exception:
             try:
@@ -244,7 +245,7 @@ def login(sb, email, password):
         'button:contains("Login")',
     ]:
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout
+            if sb.is_element_present(sel, timeout=2):
                 sb.uc_click(sel)
                 break
         except Exception:
@@ -288,6 +289,7 @@ def open_servers_page(sb):
         pass
     time.sleep(2)
 
+    # 确认到了 servers 页
     for _ in range(15):
         url = (sb.get_current_url() or "").lower()
         title = (sb.get_title() or "").lower()
@@ -299,8 +301,9 @@ def open_servers_page(sb):
         if "routename=servers" in url.replace(" ", "") or "my servers" in title or "valid until" in body:
             print(f"✅ 已在 My servers | {sb.get_current_url()}")
             return True
+        # 侧栏点 My servers
         try:
-            if sb.is_element_present('a:contains("My servers")'):  # 去掉 timeout
+            if sb.is_element_present('a:contains("My servers")', timeout=1):
                 sb.click('a:contains("My servers")')
                 time.sleep(2)
                 continue
@@ -313,6 +316,10 @@ def open_servers_page(sb):
 
 
 def find_extend_info(sb):
+    """
+    在 My servers 页查找 Extend 按钮状态。
+    返回 dict: found, clickable, selector, valid_until, reason
+    """
     info = {
         "found": False,
         "clickable": False,
@@ -333,6 +340,7 @@ def find_extend_info(sb):
     except Exception:
         pass
 
+    # 优先 JS 检查按钮（含 disabled / 灰显）
     try:
         state = sb.execute_script(
             """
@@ -342,11 +350,14 @@ def find_extend_info(sb):
             for (const el of nodes) {
               const t = (el.innerText || el.textContent || '').trim().toLowerCase();
               if (!t) continue;
+              // 只要短标签，避免点到整卡
               if (t !== 'extend' && t !== 'renew' && !/^\\s*(extend|renew)\\s*$/i.test(t)) {
+                // 允许 "Extend" 带图标文字被拆开
                 if (!(t.includes('extend') && t.length <= 20)) continue;
               }
               const tag = el.tagName.toLowerCase();
               if (!['a','button','span','div'].includes(tag)) continue;
+              // 找可点的最近按钮/链接
               let target = el;
               if (tag === 'span' || tag === 'div') {
                 const p = el.closest('a,button');
@@ -369,6 +380,7 @@ def find_extend_info(sb):
                 disabled: !!disabled,
                 cls: target.className || '',
               };
+              // 优先可点的
               if (!disabled) break;
             }
             return best;
@@ -392,6 +404,7 @@ def find_extend_info(sb):
     except Exception as e:
         print(f"⚠️ JS 查找 Extend 异常: {e}")
 
+    # 选择器兜底
     for sel in [
         'a:contains("Extend")',
         'button:contains("Extend")',
@@ -399,7 +412,7 @@ def find_extend_info(sb):
         'button:contains("Renew")',
     ]:
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout
+            if sb.is_element_present(sel, timeout=2):
                 info["found"] = True
                 info["selector"] = sel
                 el = sb.find_element(sel, timeout=2)
@@ -423,6 +436,7 @@ def find_extend_info(sb):
 
 
 def click_extend(sb):
+    """在 My servers 页点击 Extend；若不可点则返回失败原因。"""
     info = find_extend_info(sb)
     if not info["found"]:
         return False, info
@@ -430,6 +444,7 @@ def click_extend(sb):
     if not info["clickable"]:
         return False, info
 
+    # 有 href 直接跳（更稳）
     href = info.get("href") or ""
     if href and href not in ("#", "javascript:void(0)", "javascript:;"):
         if href.startswith("/"):
@@ -442,17 +457,20 @@ def click_extend(sb):
         except Exception as e:
             print(f"⚠️ href 打开失败: {e}")
 
+    # 直接打开已知续期 URL（若配置了 SERVER_ID）
     if SERVER_ID:
+        # PteroCA 常见: cart_renew
         for route in ("cart_renew", "server_renew", "renew"):
             url = f"https://client.therose.cloud/panel?routeName={route}&id={SERVER_ID}"
             print(f"➡️ 尝试直达: {url}")
             sb.open(url)
             time.sleep(2)
             if "renew" in (sb.get_title() or "").lower() or sb.is_element_present(
-                "#order-submit"
+                "#order-submit", timeout=2
             ):
                 return True, info
 
+    # 点击
     for sel in [
         'a:contains("Extend")',
         'button:contains("Extend")',
@@ -460,7 +478,7 @@ def click_extend(sb):
         'button:contains("Renew")',
     ]:
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout
+            if sb.is_element_present(sel, timeout=2):
                 print(f"🖱 点击: {sel}")
                 try:
                     sb.uc_click(sel, timeout=5)
@@ -472,6 +490,7 @@ def click_extend(sb):
         except Exception as e:
             print(f"⚠️ 点击 {sel} 失败: {e}")
 
+    # JS 强制点击第一个非 disabled 的 Extend
     try:
         ok = sb.execute_script(
             """
@@ -497,14 +516,15 @@ def click_extend(sb):
 
 
 def wait_renew_page(sb, timeout=30):
+    """等待进入 Renew your server 页。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         title = (sb.get_title() or "").lower()
         url = (sb.get_current_url() or "").lower()
         has_form = False
         try:
-            has_form = sb.is_element_present("#renew-form") or sb.is_element_present(
-                "#order-submit"
+            has_form = sb.is_element_present("#renew-form", timeout=1) or sb.is_element_present(
+                "#order-submit", timeout=1
             )
         except Exception:
             pass
@@ -516,14 +536,17 @@ def wait_renew_page(sb, timeout=30):
 
 
 def click_order_now(sb):
+    """在续期页点击 #order-submit (Order now)。"""
     print("⏳ 等待 Order now 可点击...")
     deadline = time.time() + 25
     while time.time() < deadline:
         try:
+            # 价格为 0 时页面 JS 会解除 disabled；若仍 disabled 且金额为 0，强制启用
             sb.execute_script(
                 """
                 const btn = document.querySelector('#order-submit');
                 if (!btn) return;
+                // 触发 duration change 让汇总脚本跑一遍
                 const sel = document.querySelector('#duration');
                 if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
                 """
@@ -532,6 +555,7 @@ def click_order_now(sb):
             el = sb.find_element("#order-submit", timeout=3)
             disabled = el.get_attribute("disabled")
             if disabled:
+                # 免费套餐强制解开
                 sb.execute_script(
                     """
                     const btn = document.querySelector('#order-submit');
@@ -555,13 +579,14 @@ def click_order_now(sb):
             print(f"⏳ 等待按钮: {e}")
             time.sleep(1)
 
+    # 文案兜底
     for sel in [
         'button:contains("Order now")',
         'button:contains("Order Now")',
         'button[type="submit"]',
     ]:
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout
+            if sb.is_element_present(sel, timeout=2):
                 sb.uc_click(sel)
                 time.sleep(4)
                 return True, None
@@ -590,9 +615,11 @@ def check_renewal_success(sb):
         ):
             if kw in blob:
                 return True, f"关键词: {kw}"
+        # 成功后常回到 panel / servers，且 Valid until 变远
         url = (sb.get_current_url() or "").lower()
         if "panel" in url and "renew" not in url and "cart_renew" not in url:
-            if sb.is_element_present(".alert-success"):
+            # 弱成功：已离开续期页
+            if sb.is_element_present(".alert-success", timeout=2):
                 t = sb.get_text(".alert-success")
                 return True, t or "alert-success"
     except Exception as e:
@@ -600,7 +627,7 @@ def check_renewal_success(sb):
 
     for sel in [".alert-success", ".alert.alert-success", 'div:contains("successfully")']:
         try:
-            if sb.is_element_present(sel):  # 去掉 timeout
+            if sb.is_element_present(sel, timeout=2):
                 t = sb.get_text(sel)
                 return True, t or sel
         except Exception:
@@ -665,12 +692,14 @@ def main():
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, "❌ 登录失败", req_proxies)
             sys.exit(1)
 
+        # —— 正确续期路径 ——
         open_servers_page(sb)
         dump_debug(sb, "servers_page")
 
         clicked, info = click_extend(sb)
         if not clicked:
             reason = info.get("reason") or "无法点击 Extend"
+            # Extend 灰掉：业务上可能尚未到可续窗口，不算脚本逻辑错误
             if info.get("found") and not info.get("clickable"):
                 msg = (
                     f"⏳ Extend 按钮不可点（可能未到可续时间）。"
@@ -679,6 +708,7 @@ def main():
                 print(msg)
                 dump_debug(sb, "extend_disabled")
                 send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
+                # 用 exit 0 避免 Actions 一直红——可选；用户可能更想红灯
                 sys.exit(0)
             msg = f"❌ 点击 Extend 失败: {reason}"
             print(msg)
