@@ -1,9 +1,5 @@
 # TheRose 自动续期 - GitHub Actions（Hysteria2 / hy2）
-#
-# Chrome 不支持 hy2，流程是：
-#   1) 下载官方 hysteria 客户端
-#   2) 连你的 hy2 节点，并在本机开 SOCKS5 127.0.0.1:1080
-#   3) 脚本 PROXY=socks5://127.0.0.1:1080 走本地代理
+# 支持自动重启（需设置 SERVER_URL Secret）
 #
 # Secrets（hy2 三选一）：
 #   A) HY2_URI（推荐）
@@ -16,8 +12,7 @@
 #   C) HY2_CONFIG  完整客户端 yaml（会强制确保有 socks5:1080）
 #
 # 其它: EMAIL, PASSWORD 必填；TG_BOT_TOKEN, TG_CHAT_ID 可选
-#
-# 路径: .github/workflows/renew_therose.yml
+# 新增: SERVER_URL 可选（若设置则执行重启）
 
 name: Renew TheRose
 
@@ -239,6 +234,8 @@ jobs:
           # 走 hy2 客户端本地 SOCKS5
           PROXY: socks5://127.0.0.1:1080
           DISPLAY: ":99"
+          # 新增：服务器面板地址（用于重启）
+          SERVER_URL: ${{ secrets.SERVER_URL }}
         run: |
           xvfb-run -a --server-args="-screen 0 1920x1080x24" \
             python renew_therose.py
