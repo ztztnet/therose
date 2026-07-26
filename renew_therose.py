@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-TheRose 自动续期
+TheRose 自动续期 + 自动重启
 正确流程：
   登录 → /panel?routeName=servers (My servers)
        → 点 Extend
        → 续期页 #order-submit (Order now)
+  续期完成后，自动重启服务器（需设置 SERVER_URL 环境变量）
 """
 
 import os
@@ -27,6 +28,8 @@ PROXY_PASS = (os.environ.get("PROXY_PASS") or "").strip()
 PROXY_SCHEME = (os.environ.get("PROXY_SCHEME") or "socks5").strip().lower()
 # 可选：直接指定服务器数字 id（表单里的 2591），不设则自动点第一个 Extend
 SERVER_ID = (os.environ.get("SERVER_ID") or "").strip()
+# 新增：服务器面板地址（用于重启）
+SERVER_URL = (os.environ.get("SERVER_URL") or "").strip()
 
 BASE_URL = "https://client.therose.cloud/login"
 SERVERS_URL = "https://client.therose.cloud/panel?routeName=servers"
@@ -652,6 +655,132 @@ def check_proxy_with_requests(proxy, req_proxies):
     return False
 
 
+# ===================== 新增：重启服务器函数 =====================
+def reboot_server(sb, url):
+    """
+    在已登录状态下，打开服务器面板并执行重启操作。
+    返回 (success: bool, message: str)
+    """
+    print(f"🔄 准备进入服务器面板进行重启: {url}")
+    try:
+        sb.open(url)
+        sb.wait_for_ready_state_complete()
+        time.sleep(5)  # 给面板一点时间加载状态
+
+        # ==========================================
+        # 1. 处理控制面板需要独立登录的情况
+        # ==========================================
+        if sb.is_element_visible('input[type="password"]'):
+            print("🔒 检测到控制面板需要独立登录，正在尝试自动输入账号密码...")
+            try:
+                # 输入账号 (兼容不同的输入框 name 属性)
+                if sb.is_element_visible('input[name="user"]'):
+                    sb.type('input[name="user"]', EMAIL)
+                elif sb.is_element_visible('input[type="text"]'):
+                    sb.type('input[type="text"]', EMAIL)
+
+                # 输入密码
+                sb.type('input[type="password"]', PASSWORD)
+                time.sleep(1)
+
+                # 尝试处理人机验证 (如果存在)
+                try:
+                    sb.uc_gui_click_captcha()
+                except Exception:
+                    pass  # 如果没有验证码或点击报错，则直接跳过
+
+                time.sleep(3)
+
+                # 点击登录按钮
+                try:
+                    sb.click('button:contains("Login")')
+                except Exception:
+                    sb.click('button[type="submit"]')
+
+                time.sleep(8)  # 等待登录完成并跳转
+            except Exception as e:
+                print(f"⚠️ 自动登录控制面板发生错误: {e}")
+
+        # ==========================================
+        # 2. 检查是否被重定向到主页，如果是则强制返回详情页
+        # ==========================================
+        current_url = sb.get_current_url()
+        if "/server/" not in current_url:
+            print("🔀 检测到停留在主列表页，正在强制进入目标服务器控制台...")
+            sb.open(url)
+            sb.wait_for_ready_state_complete()
+            time.sleep(6)
+
+        # ==========================================
+        # 3. 寻找并点击“重启”按钮
+        # ==========================================
+        reboot_selectors = [
+            'button[data-action="restart"]',
+            'button i.fa-redo',
+            'button i.fa-sync'
+        ]
+
+        btn_clicked = False
+
+        # 方案 A: 通过常规 CSS 选择器点击
+        for sel in reboot_selectors:
+            try:
+                if sb.is_element_visible(sel):
+                    print(f"✅ 找到重启按钮，选择器: {sel}")
+                    sb.uc_click(sel)
+                    btn_clicked = True
+                    break
+            except Exception:
+                continue
+
+        # 方案 B: 降级方案（JS 直接定位右上角的中间按钮）
+        if not btn_clicked:
+            print("⚠️ 未能通过常规选择器找到按钮，正在使用 JavaScript 定位中间的重启按钮...")
+            try:
+                btn_clicked = sb.driver.execute_script("""
+                    const buttons = document.querySelectorAll('div.flex.items-center button, div.items-center button');
+
+                    // 1. 先尝试通过特征匹配
+                    for (let btn of buttons) {
+                        if (btn.getAttribute('data-action') === 'restart' || 
+                            btn.innerHTML.includes('fa-redo') || 
+                            btn.innerHTML.includes('fa-sync')) {
+                            btn.click();
+                            return true;
+                        }
+                    }
+
+                    // 2. 如果特征匹配失败，直接点击三个按钮中的中间那一个 (索引为 1)
+                    if (buttons.length >= 3) {
+                        buttons[1].click(); 
+                        return true;
+                    } else if (buttons.length >= 2) {
+                        // 如果只有两个按钮，通常是 启动 和 重启，重启在最后
+                        buttons[buttons.length - 1].click();
+                        return true;
+                    }
+                    return false;
+                """)
+                if btn_clicked:
+                    print("✅ 通过 JavaScript 成功点击了中间的重启按钮")
+            except Exception as ex:
+                print(f"⚠️ JS 降级点击失败: {ex}")
+
+        # ==========================================
+        # 4. 验证结果
+        # ==========================================
+        if btn_clicked:
+            print("⏳ 等待重启命令发送...")
+            time.sleep(3)
+            return True, "已成功发送重启指令"
+        else:
+            return False, "页面上未检测到重启按钮"
+
+    except Exception as e:
+        return False, f"重启操作发生异常: {e}"
+# ===================== 新增结束 =====================
+
+
 def main():
     proxy = build_proxy()
     if proxy:
@@ -734,14 +863,33 @@ def main():
 
         success, detail = check_renewal_success(sb)
         if success:
-            msg = f"✅ 续期成功！{detail}"
-            print(msg)
+            renewal_msg = f"✅ 续期成功！{detail}"
+            print(renewal_msg)
             sb.save_screenshot("renewal_success.png")
         else:
-            msg = f"⚠️ 已提交但未确认成功: {detail}"
-            print(msg)
+            renewal_msg = f"⚠️ 已提交但未确认成功: {detail}"
+            print(renewal_msg)
             dump_debug(sb, "renewal_uncertain")
-        send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
+
+        # ========== 新增：重启服务器（无论续期结果如何，都尝试重启）==========
+        reboot_msg = ""
+        if SERVER_URL:
+            print("🔄 开始执行服务器重启...")
+            reboot_ok, reboot_detail = reboot_server(sb, SERVER_URL)
+            if reboot_ok:
+                reboot_msg = f"✅ 重启成功: {reboot_detail}"
+                sb.save_screenshot("reboot_success.png")
+            else:
+                reboot_msg = f"⚠️ 重启失败: {reboot_detail}"
+                sb.save_screenshot("reboot_failed.png")
+            print(reboot_msg)
+        else:
+            print("ℹ️ 未设置 SERVER_URL，跳过重启")
+            reboot_msg = "ℹ️ 未设置 SERVER_URL，跳过重启"
+
+        # 合并通知
+        final_msg = f"{renewal_msg}\n---\n{reboot_msg}"
+        send_tg(TG_BOT_TOKEN, TG_CHAT_ID, final_msg, req_proxies)
 
     print("🏁 完成")
 
