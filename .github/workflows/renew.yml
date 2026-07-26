@@ -23,7 +23,7 @@ name: Renew TheRose
 
 on:
   schedule:
-    - cron: "*/55 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 concurrency:
