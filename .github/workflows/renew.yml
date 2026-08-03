@@ -18,7 +18,7 @@ name: Renew TheRose
 
 on:
   schedule:
-    - cron: "*/20 * * * *"
+    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -32,10 +32,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v4
 
       - name: Setup Python
-        uses: actions/setup-python@v6
+        uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
@@ -127,13 +127,11 @@ jobs:
 
           if hy2_config:
               text = hy2_config
-              # 确保有本地 socks5
               if "socks5:" not in text:
                   text = text.rstrip() + "\n\nsocks5:\n  listen: 127.0.0.1:1080\nhttp:\n  listen: 127.0.0.1:8080\n"
               cfg_path.write_text(text, encoding="utf-8")
               print("✅ 使用 HY2_CONFIG")
           elif hy2_uri:
-              # hysteria2://auth@host:port/?sni=...&insecure=1&obfs-password=...
               u = urlparse(hy2_uri)
               if u.scheme not in ("hysteria2", "hy2", "hysteria"):
                   print(f"❌ HY2_URI scheme 不支持: {u.scheme}")
@@ -144,7 +142,6 @@ jobs:
                   print("❌ HY2_URI 缺少主机")
                   sys.exit(1)
               password = unquote(u.password or u.username or "")
-              # 有些链接把密码放在 username，server 在 hostname
               if u.password is None and u.username and not password:
                   password = unquote(u.username)
               if u.password:
@@ -195,7 +192,6 @@ jobs:
                 break
               fi
             fi
-            # 进程是否还活着
             if ! kill -0 "$(cat "$HOME/.hy2/hy2.pid")" 2>/dev/null; then
               echo "❌ hysteria 进程已退出"
               break
@@ -252,7 +248,7 @@ jobs:
 
       - name: Upload debug artifacts
         if: always()
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v4
         with:
           name: renewal-debug-${{ github.run_id }}
           path: |
