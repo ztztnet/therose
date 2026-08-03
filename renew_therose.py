@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
 """
 TheRose 自动续期 + 自动重启
 正确流程：
@@ -26,9 +28,7 @@ PROXY_PORT = (os.environ.get("PROXY_PORT") or "").strip()
 PROXY_USER = (os.environ.get("PROXY_USER") or "").strip()
 PROXY_PASS = (os.environ.get("PROXY_PASS") or "").strip()
 PROXY_SCHEME = (os.environ.get("PROXY_SCHEME") or "socks5").strip().lower()
-# 可选：直接指定服务器数字 id（表单里的 2591），不设则自动点第一个 Extend
 SERVER_ID = (os.environ.get("SERVER_ID") or "").strip()
-# 新增：服务器面板地址（用于重启）
 SERVER_URL = (os.environ.get("SERVER_URL") or "").strip()
 
 BASE_URL = "https://client.therose.cloud/login"
@@ -279,20 +279,260 @@ def login(sb, email, password):
     return False, sb.get_current_url()
 
 
+def is_login_page(sb):
+    """判断当前页面是否为登录页"""
+    try:
+        url = (sb.get_current_url() or "").lower()
+        title = (sb.get_title() or "").lower()
+        html = ""
+        try:
+            html = (sb.get_page_source() or "").lower()[:3000]
+        except Exception:
+            pass
+        combined = f"{url} {title} {html}"
+        if "login" in url or "signin" in url or "auth" in url:
+            return True
+        if "login" in title or "sign in" in title:
+            return True
+        if "password" in html and ("email" in html or "username" in html or "user" in html):
+            return True
+        return False
+    except Exception:
+        return False
+
+
+def ensure_logged_in_client(sb, max_attempts=3):
+    """确保 client.therose.cloud 处于已登录状态。"""
+    for attempt in range(max_attempts):
+        if not is_login_page(sb):
+            return True
+        
+        print(f"🔐 检测到 client 登录页，尝试登录 (第 {attempt + 1} 次)...")
+        sb.save_screenshot(f"client_relogin_attempt_{attempt + 1}.png")
+        
+        try:
+            sb.type('input[type="email"]', EMAIL, timeout=5)
+        except Exception:
+            try:
+                sb.type('#login_form_email', EMAIL, timeout=5)
+            except Exception:
+                try:
+                    sb.type('input[name*="email" i]', EMAIL, timeout=5)
+                except Exception as e:
+                    print(f"⚠️ 邮箱输入失败: {e}")
+                    continue
+        
+        try:
+            sb.type('input[type="password"]', PASSWORD, timeout=5)
+        except Exception:
+            try:
+                sb.type('#login_form_password', PASSWORD, timeout=5)
+            except Exception as e:
+                print(f"⚠️ 密码输入失败: {e}")
+                continue
+        
+        time.sleep(1)
+        
+        try:
+            sb.uc_gui_click_captcha()
+            time.sleep(3)
+        except Exception:
+            pass
+        
+        clicked = False
+        for sel in [
+            'button:contains("Sign in")',
+            'button:contains("Login")',
+            'button:contains("Log in")',
+            'button[type="submit"]',
+            'input[type="submit"]',
+        ]:
+            try:
+                if sb.is_element_present(sel, timeout=2):
+                    sb.uc_click(sel, timeout=5)
+                    clicked = True
+                    break
+            except Exception:
+                continue
+        
+        if not clicked:
+            try:
+                sb.driver.execute_script(
+                    "var b=document.querySelector('button[type=submit],input[type=submit]');"
+                    "if(b)b.click();"
+                )
+            except Exception:
+                pass
+        
+        time.sleep(8)
+        
+        if not is_login_page(sb):
+            print("✅ 重新登录 client 成功")
+            return True
+    
+    return False
+
+
+def auto_login_panel(sb, max_attempts=3):
+    """
+    处理 panel.therose.cloud 的独立登录。
+    使用 is_element_visible 替代 find_elements 避免 timeout 参数错误。
+    """
+    for attempt in range(max_attempts):
+        if not is_login_page(sb):
+            return True
+        
+        print(f"🔐 检测到 panel 登录页，尝试登录 (第 {attempt + 1} 次)...")
+        sb.save_screenshot(f"panel_relogin_attempt_{attempt + 1}.png")
+        
+        # 判断是否有密码输入框来确定是否真的是登录页
+        try:
+            if not sb.is_element_visible('input[type="password"]'):
+                print("⚠️ 未检测到密码输入框，可能不是登录页")
+                time.sleep(2)
+                continue
+        except Exception:
+            time.sleep(2)
+            continue
+        
+        # 填写用户名/邮箱
+        user_filled = False
+        user_selectors = [
+            'input[name="user"]',
+            'input[type="text"]',
+            'input[name="email"]',
+            'input[type="email"]',
+            'input[name*="user" i]',
+            'input[name*="email" i]',
+            'input[id*="user" i]',
+            'input[id*="email" i]',
+            'input[placeholder*="user" i]',
+            'input[placeholder*="email" i]',
+        ]
+        
+        for sel in user_selectors:
+            try:
+                if sb.is_element_visible(sel):
+                    sb.type(sel, EMAIL)
+                    user_filled = True
+                    print(f"✅ 已填入用户名/邮箱，选择器: {sel}")
+                    break
+            except Exception:
+                continue
+        
+        if not user_filled:
+            # 使用 JS 找第一个可见的非密码输入框
+            try:
+                filled = sb.execute_script("""
+                    var inputs = document.querySelectorAll('input:not([type="hidden"]):not([type="password"])');
+                    for (var i = 0; i < inputs.length; i++) {
+                        if (inputs[i].offsetParent !== null) {
+                            inputs[i].value = arguments[0];
+                            inputs[i].dispatchEvent(new Event('input', { bubbles: true }));
+                            return true;
+                        }
+                    }
+                    return false;
+                """, EMAIL)
+                if filled:
+                    user_filled = True
+                    print("✅ 已填入第一个可见文本输入框")
+            except Exception as e:
+                print(f"⚠️ 填入用户名失败: {e}")
+                continue
+        
+        if not user_filled:
+            print("⚠️ 无法填入用户名，跳过本次尝试")
+            time.sleep(2)
+            continue
+        
+        # 填写密码
+        try:
+            if sb.is_element_visible('input[type="password"]'):
+                sb.type('input[type="password"]', PASSWORD)
+                print("✅ 已填入密码")
+        except Exception as e:
+            print(f"⚠️ 密码输入失败: {e}")
+            continue
+        
+        time.sleep(1)
+        
+        # 处理可能的验证码
+        try:
+            sb.uc_gui_click_captcha()
+            time.sleep(3)
+        except Exception:
+            pass
+        
+        # 点击登录按钮
+        clicked = False
+        for sel in [
+            'button:contains("Sign in")',
+            'button:contains("Login")',
+            'button:contains("Log in")',
+            'button:contains("登录")',
+            'button[type="submit"]',
+            'input[type="submit"]',
+            'button:contains("Authenticate")',
+        ]:
+            try:
+                if sb.is_element_visible(sel):
+                    sb.uc_click(sel)
+                    clicked = True
+                    print(f"✅ 已点击登录按钮: {sel}")
+                    break
+            except Exception:
+                continue
+        
+        if not clicked:
+            try:
+                sb.driver.execute_script(
+                    "var b=document.querySelector('button[type=submit],input[type=submit]');"
+                    "if(b)b.click();"
+                )
+                print("✅ 已通过 JS 点击提交按钮")
+            except Exception:
+                pass
+        
+        time.sleep(8)
+        
+        if not is_login_page(sb):
+            print("✅ panel 登录成功")
+            return True
+    
+    return False
+
+
+def navigate_with_login_check(sb, target_url, desc="页面", is_panel=False):
+    """导航到目标URL，如果遇到登录页则自动登录。"""
+    print(f"🌐 导航到{desc}: {target_url}")
+    sb.open(target_url)
+    sb.wait_for_ready_state_complete()
+    time.sleep(5)
+    
+    if is_panel:
+        if not auto_login_panel(sb):
+            print(f"❌ 导航到{desc}后登录失败")
+            return sb.get_current_url()
+    else:
+        if not ensure_logged_in_client(sb):
+            print(f"❌ 导航到{desc}后登录失败")
+            return sb.get_current_url()
+    
+    if is_login_page(sb):
+        print(f"🔄 登录后重新导航到{desc}")
+        sb.open(target_url)
+        sb.wait_for_ready_state_complete()
+        time.sleep(5)
+    
+    return sb.get_current_url()
+
+
 def open_servers_page(sb):
     """打开 My servers 列表页。"""
     print(f"🌐 打开 My servers: {SERVERS_URL}")
-    try:
-        sb.uc_open_with_reconnect(SERVERS_URL, reconnect_time=4)
-    except Exception:
-        sb.open(SERVERS_URL)
-    try:
-        sb.wait_for_ready_state_complete(timeout=30)
-    except Exception:
-        pass
-    time.sleep(2)
-
-    # 确认到了 servers 页
+    navigate_with_login_check(sb, SERVERS_URL, "My servers", is_panel=False)
+    
     for _ in range(15):
         url = (sb.get_current_url() or "").lower()
         title = (sb.get_title() or "").lower()
@@ -304,7 +544,6 @@ def open_servers_page(sb):
         if "routename=servers" in url.replace(" ", "") or "my servers" in title or "valid until" in body:
             print(f"✅ 已在 My servers | {sb.get_current_url()}")
             return True
-        # 侧栏点 My servers
         try:
             if sb.is_element_present('a:contains("My servers")', timeout=1):
                 sb.click('a:contains("My servers")')
@@ -313,16 +552,12 @@ def open_servers_page(sb):
         except Exception:
             pass
         time.sleep(1)
-
+    
     print("⚠️ 可能未稳定进入 My servers，继续尝试点 Extend")
     return True
 
 
 def find_extend_info(sb):
-    """
-    在 My servers 页查找 Extend 按钮状态。
-    返回 dict: found, clickable, selector, valid_until, reason
-    """
     info = {
         "found": False,
         "clickable": False,
@@ -342,25 +577,20 @@ def find_extend_info(sb):
             print(f"⏱ Valid until: {info['valid_until']}")
     except Exception:
         pass
-
-    # 优先 JS 检查按钮（含 disabled / 灰显）
+    
     try:
         state = sb.execute_script(
             """
-            const words = ['extend', 'renew'];
             const nodes = Array.from(document.querySelectorAll('a,button,span,div'));
             let best = null;
             for (const el of nodes) {
               const t = (el.innerText || el.textContent || '').trim().toLowerCase();
               if (!t) continue;
-              // 只要短标签，避免点到整卡
               if (t !== 'extend' && t !== 'renew' && !/^\\s*(extend|renew)\\s*$/i.test(t)) {
-                // 允许 "Extend" 带图标文字被拆开
                 if (!(t.includes('extend') && t.length <= 20)) continue;
               }
               const tag = el.tagName.toLowerCase();
               if (!['a','button','span','div'].includes(tag)) continue;
-              // 找可点的最近按钮/链接
               let target = el;
               if (tag === 'span' || tag === 'div') {
                 const p = el.closest('a,button');
@@ -383,7 +613,6 @@ def find_extend_info(sb):
                 disabled: !!disabled,
                 cls: target.className || '',
               };
-              // 优先可点的
               if (!disabled) break;
             }
             return best;
@@ -406,8 +635,7 @@ def find_extend_info(sb):
             return info
     except Exception as e:
         print(f"⚠️ JS 查找 Extend 异常: {e}")
-
-    # 选择器兜底
+    
     for sel in [
         'a:contains("Extend")',
         'button:contains("Extend")',
@@ -433,21 +661,19 @@ def find_extend_info(sb):
                 return info
         except Exception:
             continue
-
+    
     info["reason"] = "页面上未找到 Extend/Renew 按钮（是否还在 My servers？）"
     return info
 
 
 def click_extend(sb):
-    """在 My servers 页点击 Extend；若不可点则返回失败原因。"""
     info = find_extend_info(sb)
     if not info["found"]:
         return False, info
-
+    
     if not info["clickable"]:
         return False, info
-
-    # 有 href 直接跳（更稳）
+    
     href = info.get("href") or ""
     if href and href not in ("#", "javascript:void(0)", "javascript:;"):
         if href.startswith("/"):
@@ -459,10 +685,8 @@ def click_extend(sb):
             return True, info
         except Exception as e:
             print(f"⚠️ href 打开失败: {e}")
-
-    # 直接打开已知续期 URL（若配置了 SERVER_ID）
+    
     if SERVER_ID:
-        # PteroCA 常见: cart_renew
         for route in ("cart_renew", "server_renew", "renew"):
             url = f"https://client.therose.cloud/panel?routeName={route}&id={SERVER_ID}"
             print(f"➡️ 尝试直达: {url}")
@@ -472,8 +696,7 @@ def click_extend(sb):
                 "#order-submit", timeout=2
             ):
                 return True, info
-
-    # 点击
+    
     for sel in [
         'a:contains("Extend")',
         'button:contains("Extend")',
@@ -492,8 +715,7 @@ def click_extend(sb):
                 return True, info
         except Exception as e:
             print(f"⚠️ 点击 {sel} 失败: {e}")
-
-    # JS 强制点击第一个非 disabled 的 Extend
+    
     try:
         ok = sb.execute_script(
             """
@@ -519,7 +741,6 @@ def click_extend(sb):
 
 
 def wait_renew_page(sb, timeout=30):
-    """等待进入 Renew your server 页。"""
     deadline = time.time() + timeout
     while time.time() < deadline:
         title = (sb.get_title() or "").lower()
@@ -539,17 +760,14 @@ def wait_renew_page(sb, timeout=30):
 
 
 def click_order_now(sb):
-    """在续期页点击 #order-submit (Order now)。"""
     print("⏳ 等待 Order now 可点击...")
     deadline = time.time() + 25
     while time.time() < deadline:
         try:
-            # 价格为 0 时页面 JS 会解除 disabled；若仍 disabled 且金额为 0，强制启用
             sb.execute_script(
                 """
                 const btn = document.querySelector('#order-submit');
                 if (!btn) return;
-                // 触发 duration change 让汇总脚本跑一遍
                 const sel = document.querySelector('#duration');
                 if (sel) sel.dispatchEvent(new Event('change', { bubbles: true }));
                 """
@@ -558,7 +776,6 @@ def click_order_now(sb):
             el = sb.find_element("#order-submit", timeout=3)
             disabled = el.get_attribute("disabled")
             if disabled:
-                # 免费套餐强制解开
                 sb.execute_script(
                     """
                     const btn = document.querySelector('#order-submit');
@@ -581,8 +798,7 @@ def click_order_now(sb):
         except Exception as e:
             print(f"⏳ 等待按钮: {e}")
             time.sleep(1)
-
-    # 文案兜底
+    
     for sel in [
         'button:contains("Order now")',
         'button:contains("Order Now")',
@@ -618,16 +834,14 @@ def check_renewal_success(sb):
         ):
             if kw in blob:
                 return True, f"关键词: {kw}"
-        # 成功后常回到 panel / servers，且 Valid until 变远
         url = (sb.get_current_url() or "").lower()
         if "panel" in url and "renew" not in url and "cart_renew" not in url:
-            # 弱成功：已离开续期页
             if sb.is_element_present(".alert-success", timeout=2):
                 t = sb.get_text(".alert-success")
                 return True, t or "alert-success"
     except Exception as e:
         return False, str(e)
-
+    
     for sel in [".alert-success", ".alert.alert-success", 'div:contains("successfully")']:
         try:
             if sb.is_element_present(sel, timeout=2):
@@ -655,130 +869,134 @@ def check_proxy_with_requests(proxy, req_proxies):
     return False
 
 
-# ===================== 新增：重启服务器函数 =====================
+def click_button_by_text(sb, text):
+    """
+    借鉴作者：通过 JS 精确匹配按钮文字，点击可见且未禁用的按钮。
+    """
+    return sb.driver.execute_script("""
+        const target = arguments[0].toLowerCase().trim();
+        const buttons = document.querySelectorAll('button');
+        for (const btn of buttons) {
+            const rect = btn.getBoundingClientRect();
+            const visible = rect.width > 0 && rect.height > 0;
+            const enabled = !btn.disabled;
+            const label = (btn.innerText || btn.textContent || '').trim().toLowerCase();
+            if (visible && enabled && label === target) {
+                btn.scrollIntoView({block: 'center', inline: 'center'});
+                btn.click();
+                return true;
+            }
+        }
+        return false;
+    """, text)
+
+
+def click_confirm_modal(sb):
+    """
+    借鉴作者：点击可能的确认弹窗。
+    """
+    for kw in ["Confirm", "Yes", "确定", "确认"]:
+        try:
+            if click_button_by_text(sb, kw):
+                print(f"  ✅ 已点击确认弹窗: {kw}")
+                time.sleep(1)
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def reboot_server(sb, url):
     """
-    在已登录状态下，打开服务器面板并执行重启操作。
-    返回 (success: bool, message: str)
+    借鉴作者的改进：先判断服务器状态，再精确匹配按钮文字，处理确认弹窗，验证重启结果。
     """
-    print(f"🔄 准备进入服务器面板进行重启: {url}")
+    print(f"🔄 准备进入服务器面板: {url}")
     try:
-        sb.open(url)
-        sb.wait_for_ready_state_complete()
-        time.sleep(5)  # 给面板一点时间加载状态
-
-        # ==========================================
-        # 1. 处理控制面板需要独立登录的情况
-        # ==========================================
-        if sb.is_element_visible('input[type="password"]'):
-            print("🔒 检测到控制面板需要独立登录，正在尝试自动输入账号密码...")
-            try:
-                # 输入账号 (兼容不同的输入框 name 属性)
-                if sb.is_element_visible('input[name="user"]'):
-                    sb.type('input[name="user"]', EMAIL)
-                elif sb.is_element_visible('input[type="text"]'):
-                    sb.type('input[type="text"]', EMAIL)
-
-                # 输入密码
-                sb.type('input[type="password"]', PASSWORD)
-                time.sleep(1)
-
-                # 尝试处理人机验证 (如果存在)
-                try:
-                    sb.uc_gui_click_captcha()
-                except Exception:
-                    pass  # 如果没有验证码或点击报错，则直接跳过
-
-                time.sleep(3)
-
-                # 点击登录按钮
-                try:
-                    sb.click('button:contains("Login")')
-                except Exception:
-                    sb.click('button[type="submit"]')
-
-                time.sleep(8)  # 等待登录完成并跳转
-            except Exception as e:
-                print(f"⚠️ 自动登录控制面板发生错误: {e}")
-
-        # ==========================================
-        # 2. 检查是否被重定向到主页，如果是则强制返回详情页
-        # ==========================================
+        # 使用 panel 专用的导航函数
+        navigate_with_login_check(sb, url, "服务器面板", is_panel=True)
+        time.sleep(5)
+        
+        # 检查是否被重定向到主列表页
         current_url = sb.get_current_url()
         if "/server/" not in current_url:
             print("🔀 检测到停留在主列表页，正在强制进入目标服务器控制台...")
             sb.open(url)
             sb.wait_for_ready_state_complete()
             time.sleep(6)
-
-        # ==========================================
-        # 3. 寻找并点击“重启”按钮
-        # ==========================================
-        reboot_selectors = [
-            'button[data-action="restart"]',
-            'button i.fa-redo',
-            'button i.fa-sync'
-        ]
-
+        
+        # 保存控制台页面结构以便调试
+        try:
+            with open("panel_console.html", "w", encoding="utf-8", errors="ignore") as f:
+                f.write(sb.get_page_source())
+            print("📄 已保存 panel_console.html")
+        except Exception:
+            pass
+        
+        # 读取页面文本判断服务器状态
+        try:
+            source = sb.get_page_source().lower()
+        except Exception:
+            source = ""
+        
+        # 判断是否离线
+        is_offline = "offline" in source
+        
         btn_clicked = False
-
-        # 方案 A: 通过常规 CSS 选择器点击
-        for sel in reboot_selectors:
-            try:
-                if sb.is_element_visible(sel):
-                    print(f"✅ 找到重启按钮，选择器: {sel}")
-                    sb.uc_click(sel)
-                    btn_clicked = True
-                    break
-            except Exception:
-                continue
-
-        # 方案 B: 降级方案（JS 直接定位右上角的中间按钮）
-        if not btn_clicked:
-            print("⚠️ 未能通过常规选择器找到按钮，正在使用 JavaScript 定位中间的重启按钮...")
-            try:
-                btn_clicked = sb.driver.execute_script("""
-                    const buttons = document.querySelectorAll('div.flex.items-center button, div.items-center button');
-
-                    // 1. 先尝试通过特征匹配
-                    for (let btn of buttons) {
-                        if (btn.getAttribute('data-action') === 'restart' || 
-                            btn.innerHTML.includes('fa-redo') || 
-                            btn.innerHTML.includes('fa-sync')) {
-                            btn.click();
-                            return true;
-                        }
-                    }
-
-                    // 2. 如果特征匹配失败，直接点击三个按钮中的中间那一个 (索引为 1)
-                    if (buttons.length >= 3) {
-                        buttons[1].click(); 
-                        return true;
-                    } else if (buttons.length >= 2) {
-                        // 如果只有两个按钮，通常是 启动 和 重启，重启在最后
-                        buttons[buttons.length - 1].click();
-                        return true;
-                    }
-                    return false;
-                """)
-                if btn_clicked:
-                    print("✅ 通过 JavaScript 成功点击了中间的重启按钮")
-            except Exception as ex:
-                print(f"⚠️ JS 降级点击失败: {ex}")
-
-        # ==========================================
-        # 4. 验证结果
-        # ==========================================
-        if btn_clicked:
-            print("⏳ 等待重启命令发送...")
-            time.sleep(3)
-            return True, "已成功发送重启指令"
+        action_name = ""
+        
+        if is_offline:
+            print("🟡 检测到服务器处于 Offline 状态，优先点击 Start 按钮...")
+            btn_clicked = click_button_by_text(sb, "Start")
+            action_name = "启动"
         else:
-            return False, "页面上未检测到重启按钮"
-
+            print("🟢 服务器在线，准备点击 Restart 按钮...")
+            btn_clicked = click_button_by_text(sb, "Restart")
+            action_name = "重启"
+        
+        # 兜底：JS 找不到就用 SeleniumBase contains
+        if not btn_clicked:
+            target_text = "Start" if is_offline else "Restart"
+            print(f"⚠️ 文字精确匹配未找到，尝试 SeleniumBase contains: '{target_text}'")
+            try:
+                sb.uc_click(f'button:contains("{target_text}")', timeout=5)
+                btn_clicked = True
+                action_name = "启动" if is_offline else "重启"
+            except Exception as e:
+                print(f"❌ SeleniumBase 点击 '{target_text}' 失败: {e}")
+        
+        # 处理确认弹窗 + 验证结果
+        if btn_clicked:
+            click_confirm_modal(sb)
+            
+            print(f"⏳ 等待服务器{action_name}生效（最长等 60 秒）...")
+            time.sleep(5)
+            
+            success = False
+            for i in range(55):
+                try:
+                    sb.open("https://panel.therose.cloud")
+                    sb.wait_for_ready_state_complete()
+                    time.sleep(1)
+                    source = sb.get_page_source().lower()
+                except Exception:
+                    time.sleep(2)
+                    continue
+                
+                if "online" in source:
+                    success = True
+                    print(f"  ✅ 总览页检测到 Online 状态 ({i+1}次检查)")
+                    break
+            
+            if success:
+                return True, f"✅ 服务器{action_name}成功：检测到状态变为在线"
+            else:
+                sb.save_screenshot("reboot_unknown.png")
+                return False, f"⚠️ 已点击{action_name}按钮，但 60 秒内未检测到服务器状态变化"
+        else:
+            return False, "❌ 页面上未找到可点击的 Start / Restart 按钮"
+    
     except Exception as e:
         return False, f"重启操作发生异常: {e}"
-# ===================== 新增结束 =====================
 
 
 def main():
@@ -787,7 +1005,7 @@ def main():
         print(f"🌐 使用代理: {mask_proxy(proxy)}")
     else:
         print("ℹ️ 未配置 PROXY")
-
+    
     req_proxies = None
     if proxy:
         if proxy.startswith("socks5://"):
@@ -797,18 +1015,18 @@ def main():
             req_proxies = {"http": proxy, "https": proxy}
         else:
             req_proxies = {"http": f"http://{proxy}", "https": f"http://{proxy}"}
-
+    
     if proxy and not check_proxy_with_requests(proxy, req_proxies):
         msg = "❌ 代理不可用"
         print(msg)
         send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg)
         sys.exit(1)
-
+    
     print("🚀 启动浏览器")
     sb_kwargs = {"uc": True, "headless": False, "locale": "en"}
     if proxy:
         sb_kwargs["proxy"] = proxy
-
+    
     with SB(**sb_kwargs) as sb:
         try:
             ok, _ = login(sb, EMAIL, PASSWORD)
@@ -816,19 +1034,27 @@ def main():
             dump_debug(sb, "login_faild")
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, f"❌ 登录异常: {e}", req_proxies)
             sys.exit(1)
-
+        
         if not ok:
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, "❌ 登录失败", req_proxies)
             sys.exit(1)
-
-        # —— 正确续期路径 ——
+        
+        print("🔍 验证登录状态...")
+        sb.open("https://client.therose.cloud/panel?routeName=servers")
+        time.sleep(5)
+        if is_login_page(sb):
+            print("⚠️ 登录状态丢失，尝试重新登录...")
+            ok, _ = login(sb, EMAIL, PASSWORD)
+            if not ok:
+                send_tg(TG_BOT_TOKEN, TG_CHAT_ID, "❌ 重新登录失败", req_proxies)
+                sys.exit(1)
+        
         open_servers_page(sb)
         dump_debug(sb, "servers_page")
-
+        
         clicked, info = click_extend(sb)
         if not clicked:
             reason = info.get("reason") or "无法点击 Extend"
-            # Extend 灰掉：业务上可能尚未到可续窗口，不算脚本逻辑错误
             if info.get("found") and not info.get("clickable"):
                 msg = (
                     f"⏳ Extend 按钮不可点（可能未到可续时间）。"
@@ -837,21 +1063,20 @@ def main():
                 print(msg)
                 dump_debug(sb, "extend_disabled")
                 send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
-                # 用 exit 0 避免 Actions 一直红——可选；用户可能更想红灯
                 sys.exit(0)
             msg = f"❌ 点击 Extend 失败: {reason}"
             print(msg)
             dump_debug(sb, "extend_failed")
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
             sys.exit(1)
-
+        
         if not wait_renew_page(sb, timeout=35):
             msg = "❌ 点击 Extend 后未进入续期页"
             print(msg)
             dump_debug(sb, "renew_page_missing")
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
             sys.exit(1)
-
+        
         dump_debug(sb, "renew_page")
         ok_order, err = click_order_now(sb)
         if not ok_order:
@@ -860,7 +1085,7 @@ def main():
             dump_debug(sb, "order_failed")
             send_tg(TG_BOT_TOKEN, TG_CHAT_ID, msg, req_proxies)
             sys.exit(1)
-
+        
         success, detail = check_renewal_success(sb)
         if success:
             renewal_msg = f"✅ 续期成功！{detail}"
@@ -870,8 +1095,7 @@ def main():
             renewal_msg = f"⚠️ 已提交但未确认成功: {detail}"
             print(renewal_msg)
             dump_debug(sb, "renewal_uncertain")
-
-        # ========== 新增：重启服务器（无论续期结果如何，都尝试重启）==========
+        
         reboot_msg = ""
         if SERVER_URL:
             print("🔄 开始执行服务器重启...")
@@ -886,11 +1110,10 @@ def main():
         else:
             print("ℹ️ 未设置 SERVER_URL，跳过重启")
             reboot_msg = "ℹ️ 未设置 SERVER_URL，跳过重启"
-
-        # 合并通知
+        
         final_msg = f"{renewal_msg}\n---\n{reboot_msg}"
         send_tg(TG_BOT_TOKEN, TG_CHAT_ID, final_msg, req_proxies)
-
+    
     print("🏁 完成")
 
 
